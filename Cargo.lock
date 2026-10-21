@@ -85,22 +85,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embassy-nats"
-version = "1.0.0"
-dependencies = [
- "defmt 1.1.1",
- "embassy-futures",
- "embassy-net",
- "embassy-sync",
- "embedded-io-async",
- "heapless 0.9.3",
- "portable-atomic",
- "serde",
- "serde-json-core",
- "thiserror",
-]
-
-[[package]]
 name = "embassy-net"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -225,6 +209,22 @@ checksum = "eb5a1bd585135d302f8f6d7de329310938093da6271b37a6c94b8798795c0c6d"
 dependencies = [
  "embedded-io-async",
  "embedded-nal",
+]
+
+[[package]]
+name = "embedded-nats"
+version = "1.0.0"
+dependencies = [
+ "defmt 1.1.1",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-sync",
+ "embedded-io-async",
+ "heapless 0.9.3",
+ "portable-atomic",
+ "serde",
+ "serde-json-core",
+ "thiserror",
 ]
 
 [[package]]
