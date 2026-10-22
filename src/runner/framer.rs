@@ -134,7 +134,10 @@ impl<C: NatsCollections> SyncFramer<C> {
         reader: &mut R,
     ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
         let mut slice = self.buffer.reserve_slice(1)?;
-        let n = reader.read(&mut slice).await.map_err(|e| FramerError::Read(e))?;
+        let n = reader
+            .read(&mut slice)
+            .await
+            .map_err(|e| FramerError::Read(e))?;
         slice.confirm(n);
         if n == 0 {
             return Err(FramerError::Disconnected);
@@ -233,7 +236,10 @@ impl<C: NatsCollections> MsgFramer<C> {
     ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
         let pos = self.buffer.len();
         let mut slice = self.buffer.reserve_slice((self.len + DELIM.len()) - pos)?;
-        let n = reader.read(&mut slice).await.map_err(|e| FramerError::Read(e))?;
+        let n = reader
+            .read(&mut slice)
+            .await
+            .map_err(|e| FramerError::Read(e))?;
         slice.confirm(n);
         if n == 0 {
             return Err(FramerError::Disconnected);

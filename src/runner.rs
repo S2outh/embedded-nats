@@ -10,6 +10,7 @@ mod framer;
 use framer::Frame;
 use framer::Framer;
 
+use crate::runner::Error::Disconnected;
 use crate::runner::framer::FramerError;
 use crate::{
     AUTH_JSON_MAX_LEN, BytesBuf, CapacityError, CmdReceiver, DELIM, InfoSender, InternalCmd,
@@ -32,6 +33,8 @@ enum State {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Error)]
 enum Error {
+    #[error("Auth")]
+    Auth,
     #[error("Disconnected")]
     Disconnected,
     #[error("Tcp error: {0}")]
@@ -270,13 +273,15 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
     async fn run_connected(&mut self) -> Result<()> {
         match select(
             self.framer.frame(&mut self.socket),
-            self.cmd_channel.receive()
-        ).await {
+            self.cmd_channel.receive(),
+        )
+        .await
+        {
             Either::First(framer_result) => {
                 if let Some(frame) = framer_result? {
                     self.handle_frame(frame).await?
                 }
-            },
+            }
             Either::Second(cmd) => match cmd {
                 InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await?,
                 InternalCmd::Pub(topic, data) => self.publish(topic, data).await?,
@@ -286,8 +291,11 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         Ok(())
     }
     async fn run_auth_step(&mut self) -> Result<()> {
-        let framer_result = self.framer.frame(&mut self.socket).await;
-        if let Some(frame) = framer_result? {
+        let Ok(framer_result) = self.framer.frame(&mut self.socket).await else {
+            // errors here should always be handled as auth and cause a reconnect
+            return Err(Error::Auth);
+        };
+        if let Some(frame) = framer_result {
             self.handle_frame(frame).await?
         }
         Ok(())
@@ -309,7 +317,9 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
                 defmt!(error!("nats error: {}", e));
                 match e {
                     // If we had a connection issue disconnect
-                    Error::Disconnected | Error::Tcp(_) => self.disconnect().await,
+                    Error::Auth | Error::Disconnected | Error::Tcp(_) | Error::Connect(_) => {
+                        self.disconnect().await
+                    }
                     // otherwise reset framer
                     _ => self.framer = Framer::new(),
                 }

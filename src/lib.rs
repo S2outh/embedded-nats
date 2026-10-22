@@ -24,7 +24,10 @@ mod client;
 mod msg_channel;
 mod runner;
 
-use core::{net::SocketAddr, ops::{Deref, DerefMut}};
+use core::{
+    net::SocketAddr,
+    ops::{Deref, DerefMut},
+};
 
 pub use client::*;
 use embassy_net::tcp::TcpSocket;
@@ -117,7 +120,7 @@ pub trait StrBuf: Sized + Clone + PartialEq {
 }
 
 /// A reserved mutable reference to a slice. If dropped without calling confirm,
-/// the referenced collection should not be mutated.
+/// the referenced collections length will be restored.
 pub struct ReservedSlice<'a, T: BytesBuf> {
     collection: &'a mut T,
     base_ptr: usize,
@@ -190,7 +193,10 @@ impl StrBuf for alloc::string::String {
 
 #[cfg(feature = "alloc")]
 impl BytesBuf for alloc::vec::Vec<u8> {
-    fn reserve_slice(&mut self, reserved_len: usize) -> Result<ReservedSlice<'_, Self>, CapacityError> {
+    fn reserve_slice(
+        &mut self,
+        reserved_len: usize,
+    ) -> Result<ReservedSlice<'_, Self>, CapacityError> {
         let base_ptr = self.len();
         self.extend(core::iter::repeat_n(0, reserved_len));
 
@@ -238,7 +244,10 @@ impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
 }
 
 impl<const PAYLOAD: usize> BytesBuf for heapless::Vec<u8, PAYLOAD> {
-    fn reserve_slice(&mut self, reserved_len: usize) -> Result<ReservedSlice<'_, Self>, CapacityError> {
+    fn reserve_slice(
+        &mut self,
+        reserved_len: usize,
+    ) -> Result<ReservedSlice<'_, Self>, CapacityError> {
         if self.capacity() - self.len() < reserved_len {
             return Err(CapacityError::Bytes);
         }
