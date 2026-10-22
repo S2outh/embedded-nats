@@ -24,7 +24,7 @@ mod client;
 mod msg_channel;
 mod runner;
 
-use core::net::SocketAddr;
+use core::{net::SocketAddr, ops::{Deref, DerefMut}};
 
 pub use client::*;
 use embassy_net::tcp::TcpSocket;
@@ -116,15 +116,48 @@ pub trait StrBuf: Sized + Clone + PartialEq {
     fn as_str(&self) -> &str;
 }
 
+/// A reserved mutable reference to a slice. If dropped without calling confirm,
+/// the referenced collection should not be mutated.
+pub struct ReservedSlice<'a, T: BytesBuf> {
+    collection: &'a mut T,
+    base_ptr: usize,
+    reserved_len: usize,
+}
+impl<'a, T: BytesBuf> ReservedSlice<'a, T> {
+    /// confirm a set length of this slice as used
+    fn confirm(mut self, len: usize) {
+        self.base_ptr += len;
+    }
+}
+impl<'a, T: BytesBuf> Drop for ReservedSlice<'a, T> {
+    fn drop(&mut self) {
+        self.collection.truncate(self.base_ptr);
+    }
+}
+
+impl<'a, T: BytesBuf> Deref for ReservedSlice<'a, T> {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        &self.collection.as_bytes()[self.base_ptr..(self.base_ptr + self.reserved_len)]
+    }
+}
+
+impl<'a, T: BytesBuf> DerefMut for ReservedSlice<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.collection.as_bytes_mutable()[self.base_ptr..(self.base_ptr + self.reserved_len)]
+    }
+}
+
 /// A Bytes buffer, containing methods to extend, clear and retreive info from a buffer
 pub trait BytesBuf: Sized + Default {
-    /// This method tries to extend the buffer by len, and returns the mutable slice of data
-    /// that has been added
-    fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError>;
+    /// This method tries to take a slice of length `len` at the end of the buffer,
+    /// potentially increasing the size of the underlying collection.
+    fn reserve_slice(&mut self, len: usize) -> Result<ReservedSlice<'_, Self>, CapacityError>;
     /// keep only the first len bytes, or less if the collection is not large enough
     fn truncate(&mut self, len: usize);
     fn clear(&mut self);
     fn as_bytes(&self) -> &[u8];
+    fn as_bytes_mutable(&mut self) -> &mut [u8];
     fn len(&self) -> usize;
 }
 
@@ -157,10 +190,15 @@ impl StrBuf for alloc::string::String {
 
 #[cfg(feature = "alloc")]
 impl BytesBuf for alloc::vec::Vec<u8> {
-    fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError> {
-        let before = self.len();
-        self.extend(core::iter::repeat_n(0, len));
-        Ok(&mut self[before..])
+    fn reserve_slice(&mut self, reserved_len: usize) -> Result<ReservedSlice<'_, Self>, CapacityError> {
+        let base_ptr = self.len();
+        self.extend(core::iter::repeat_n(0, reserved_len));
+
+        Ok(ReservedSlice {
+            collection: self,
+            base_ptr,
+            reserved_len,
+        })
     }
     fn truncate(&mut self, len: usize) {
         self.truncate(len);
@@ -169,7 +207,10 @@ impl BytesBuf for alloc::vec::Vec<u8> {
         self.clear();
     }
     fn as_bytes(&self) -> &[u8] {
-        &self
+        self
+    }
+    fn as_bytes_mutable(&mut self) -> &mut [u8] {
+        self
     }
     fn len(&self) -> usize {
         self.as_bytes().len()
@@ -197,13 +238,19 @@ impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
 }
 
 impl<const PAYLOAD: usize> BytesBuf for heapless::Vec<u8, PAYLOAD> {
-    fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError> {
-        if self.capacity() - self.len() < len {
+    fn reserve_slice(&mut self, reserved_len: usize) -> Result<ReservedSlice<'_, Self>, CapacityError> {
+        if self.capacity() - self.len() < reserved_len {
             return Err(CapacityError::Bytes);
         }
-        let before = self.len();
-        self.extend(core::iter::repeat_n(0, len));
-        Ok(&mut self[before..])
+
+        let base_ptr = self.len();
+        self.extend(core::iter::repeat_n(0, reserved_len));
+
+        Ok(ReservedSlice {
+            collection: self,
+            base_ptr,
+            reserved_len,
+        })
     }
     fn truncate(&mut self, len: usize) {
         self.truncate(len);
@@ -212,7 +259,10 @@ impl<const PAYLOAD: usize> BytesBuf for heapless::Vec<u8, PAYLOAD> {
         self.clear();
     }
     fn as_bytes(&self) -> &[u8] {
-        &self
+        self
+    }
+    fn as_bytes_mutable(&mut self) -> &mut [u8] {
+        self
     }
     fn len(&self) -> usize {
         self.as_bytes().len()

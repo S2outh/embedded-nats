@@ -1,6 +1,7 @@
 use core::net::SocketAddr;
 
 use embassy_futures::select::{Either, select};
+use embassy_net::tcp::ConnectError;
 use embassy_net::tcp::{self, TcpSocket};
 use embedded_io_async::Write;
 use thiserror::Error;
@@ -35,6 +36,8 @@ enum Error {
     Disconnected,
     #[error("Tcp error: {0}")]
     Tcp(#[from] tcp::Error),
+    #[error("Could not connect: {0}")]
+    Connect(#[from] ConnectError),
     #[error("Capacity of collection {0} not sufficient for operation")]
     Capacity(#[from] CapacityError),
     #[error("Json serialization error {0}")]
@@ -107,10 +110,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         let _ = self.socket.flush().await;
         self.state = State::Disconnected;
     }
-    async fn read(&mut self) -> Result<()> {
-        let Some(frame) = self.framer.frame(&mut self.socket).await? else {
-            return Ok(());
-        };
+    async fn handle_frame(&mut self, frame: Frame<C>) -> Result<()> {
         match frame {
             Frame::Ping => {
                 self.socket.write_all("PONG".as_bytes()).await?;
@@ -122,9 +122,9 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
                 // serialize the connect message body into AuthBuf
                 let mut connect_msg = C::AuthBuf::default();
-                let connect_msg_slice = connect_msg.extend_by(AUTH_JSON_MAX_LEN)?;
-                let len = serde_json_core::to_slice(&self.auth, connect_msg_slice)?;
-                connect_msg.truncate(len);
+                let mut connect_msg_slice = connect_msg.reserve_slice(AUTH_JSON_MAX_LEN)?;
+                let len = serde_json_core::to_slice(&self.auth, &mut connect_msg_slice)?;
+                connect_msg_slice.confirm(len);
 
                 self.socket.write_all(b"CONNECT ").await?;
                 self.socket.write_all(connect_msg.as_bytes()).await?;
@@ -267,51 +267,52 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             .retain(|Subscription { channel, .. }| channel.is_open());
         Ok(())
     }
-    async fn run_connected(&mut self) {
-        if let Err(e) =
-            match select(self.socket.wait_read_ready(), self.cmd_channel.receive()).await {
-                Either::First(()) => self.read().await,
-                Either::Second(cmd) => match cmd {
-                    InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await,
-                    InternalCmd::Pub(topic, data) => self.publish(topic, data).await,
-                    InternalCmd::Sync => self.sync().await,
-                },
-            }
-        {
-            defmt!(error!("nats error: {}", e));
-            match e {
-                // If we had a connection issue disconnect
-                Error::Disconnected | Error::Tcp(_) => self.disconnect().await,
-                // otherwise reset framer
-                _ => self.framer = Framer::new(),
-            }
-        };
-    }
-    async fn run_auth_step(&mut self) {
-        if let Err(_e) = self.read().await {
-            defmt!(error!("nats error: {}", _e));
-            self.disconnect().await;
+    async fn run_connected(&mut self) -> Result<()> {
+        match select(
+            self.framer.frame(&mut self.socket),
+            self.cmd_channel.receive()
+        ).await {
+            Either::First(framer_result) => {
+                if let Some(frame) = framer_result? {
+                    self.handle_frame(frame).await?
+                }
+            },
+            Either::Second(cmd) => match cmd {
+                InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await?,
+                InternalCmd::Pub(topic, data) => self.publish(topic, data).await?,
+                InternalCmd::Sync => self.sync().await?,
+            },
         }
+        Ok(())
     }
-    async fn try_connect(&mut self) {
-        match self.socket.connect(self.address).await {
-            Ok(()) => {
-                self.framer = Framer::new();
-                self.state = State::Authenticating;
-            }
-            Err(_e) => defmt!(error!(
-                "could not connect to nats: {}",
-                defmt::Debug2Format(&_e)
-            )),
+    async fn run_auth_step(&mut self) -> Result<()> {
+        let framer_result = self.framer.frame(&mut self.socket).await;
+        if let Some(frame) = framer_result? {
+            self.handle_frame(frame).await?
         }
+        Ok(())
+    }
+    async fn try_connect(&mut self) -> Result<()> {
+        self.socket.connect(self.address).await?;
+        self.framer = Framer::new();
+        self.state = State::Authenticating;
+        Ok(())
     }
     /// Mainloop entry for the runner
     pub async fn run(&mut self) -> ! {
         loop {
-            match self.state {
+            if let Err(e) = match self.state {
                 State::Connected => self.run_connected().await,
                 State::Authenticating => self.run_auth_step().await,
                 State::Disconnected => self.try_connect().await,
+            } {
+                defmt!(error!("nats error: {}", e));
+                match e {
+                    // If we had a connection issue disconnect
+                    Error::Disconnected | Error::Tcp(_) => self.disconnect().await,
+                    // otherwise reset framer
+                    _ => self.framer = Framer::new(),
+                }
             }
         }
     }

@@ -133,13 +133,14 @@ impl<C: NatsCollections> SyncFramer<C> {
         &mut self,
         reader: &mut R,
     ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
-        let slice = self.buffer.extend_by(1)?;
-        let n = reader.read(slice).await.map_err(|e| FramerError::Read(e))?;
+        let mut slice = self.buffer.reserve_slice(1)?;
+        let n = reader.read(&mut slice).await.map_err(|e| FramerError::Read(e))?;
+        slice.confirm(n);
         if n == 0 {
             return Err(FramerError::Disconnected);
         }
 
-        if slice[0] == DELIM[self.magic_pos] {
+        if self.buffer.as_bytes().last().unwrap() == &DELIM[self.magic_pos] {
             self.magic_pos += 1;
             if self.magic_pos == DELIM.len() {
                 self.magic_pos = 0;
@@ -231,13 +232,13 @@ impl<C: NatsCollections> MsgFramer<C> {
         reader: &mut R,
     ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
         let pos = self.buffer.len();
-        let slice = self.buffer.extend_by((self.len + DELIM.len()) - pos)?;
-        let n = reader.read(slice).await.map_err(|e| FramerError::Read(e))?;
+        let mut slice = self.buffer.reserve_slice((self.len + DELIM.len()) - pos)?;
+        let n = reader.read(&mut slice).await.map_err(|e| FramerError::Read(e))?;
+        slice.confirm(n);
         if n == 0 {
             return Err(FramerError::Disconnected);
         }
 
-        self.buffer.truncate(pos + n);
         if self.buffer.len() >= (self.len + DELIM.len()) {
             // drop the delimeter from the end
             self.buffer.truncate(self.len);
