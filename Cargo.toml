@@ -6,15 +6,15 @@ authors = [ "Eliseo Cailloux" ]
 
 [features]
 alloc = []
-critical-section-mutex = []
-defmt = [ "dep:defmt", "embassy-sync/defmt", "embassy-futures/defmt", "embassy-net/defmt", "serde-json-core/defmt" ]
+defmt = [ "dep:defmt", "embassy-sync/defmt", "embassy-futures/defmt", "serde-json-core/defmt", "heapless/defmt" ]
 
 [dependencies]
 
-embassy-sync = { version = "0.8.0" }
-embassy-futures = { version = "0.1.2" }
-embassy-net = { version = "0.9.1", features = ["tcp", "proto-ipv4", "proto-ipv6", "medium-ethernet"] }
+embassy-sync = "0.8.0"
+embassy-futures = "0.1.2"
+
 embedded-io-async = "0.7.0"
+embedded-nal-async = "0.9.0"
 
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 serde-json-core = { version = "0.6.0" }

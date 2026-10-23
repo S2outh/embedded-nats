@@ -25,13 +25,14 @@ mod msg_channel;
 mod runner;
 
 use core::{
+    marker::PhantomData,
     net::SocketAddr,
     ops::{Deref, DerefMut},
 };
 
 pub use client::*;
-use embassy_net::tcp::TcpSocket;
-use embassy_sync::{channel, watch};
+use embassy_sync::{blocking_mutex::raw::RawMutex, channel, watch};
+use embedded_nal_async::TcpConnect;
 use msg_channel::*;
 pub use msg_channel::{AlreadyOpen, MsgChannel};
 use portable_atomic::AtomicUsize;
@@ -85,12 +86,6 @@ const INFO_MSG_MAX_LEN: usize = "INFO ".len() + 145 + 5 * INFO_METADATA_STR_SIZE
 // The size of U32 MAX in decimal is 10 bytes
 const U32_MAX_STR_LEN: usize = 10;
 
-// Mutex type used by all the embassy channels
-#[cfg(not(feature = "critical-section-mutex"))]
-type RawMutex = embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-#[cfg(feature = "critical-section-mutex")]
-type RawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Error)]
 pub enum CapacityError {
@@ -107,10 +102,16 @@ pub enum CapacityError {
 /// This trait is a container for collections used througout this library,
 /// and can be used to switch between heapless and alloc types.
 pub trait NatsCollections: sealed::Sealed {
+    /// Buffer type that will hold all topics
     type Topic: StrBuf;
+    /// Buffer type that will hold all messages
     type MsgBuf: BytesBuf;
+    /// Buffer type that will hold nats headers
     type SyncBuf: BytesBuf;
+    /// Buffer type that will hold outgoing authentication messages
     type AuthBuf: BytesBuf;
+    /// Raw mutex type used when sending the collections between threads
+    type RawMutex: RawMutex + Send + Sync;
 }
 
 /// A String buffer, containing methods to convert from and to &str
@@ -168,17 +169,20 @@ pub trait BytesBuf: Sized + Default {
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-pub struct Alloc;
+pub struct Alloc<M: RawMutex> {
+    _m: PhantomData<M>,
+}
 
 #[cfg(feature = "alloc")]
-impl sealed::Sealed for Alloc {}
+impl<M: RawMutex> sealed::Sealed for Alloc<M> {}
 
 #[cfg(feature = "alloc")]
-impl NatsCollections for Alloc {
+impl<M: RawMutex + Send + Sync> NatsCollections for Alloc<M> {
     type Topic = alloc::string::String;
     type MsgBuf = alloc::vec::Vec<u8>;
     type SyncBuf = alloc::vec::Vec<u8>;
     type AuthBuf = alloc::vec::Vec<u8>;
+    type RawMutex = M;
 }
 
 #[cfg(feature = "alloc")]
@@ -223,15 +227,23 @@ impl BytesBuf for alloc::vec::Vec<u8> {
     }
 }
 
-pub struct Heapless<const TOPIC: usize, const PAYLOAD: usize>;
+pub struct Heapless<M: RawMutex, const TOPIC: usize, const PAYLOAD: usize> {
+    _m: PhantomData<M>,
+}
 
-impl<const TOPIC: usize, const PAYLOAD: usize> sealed::Sealed for Heapless<TOPIC, PAYLOAD> {}
+impl<M: RawMutex, const TOPIC: usize, const PAYLOAD: usize> sealed::Sealed
+    for Heapless<M, TOPIC, PAYLOAD>
+{
+}
 
-impl<const TOPIC: usize, const PAYLOAD: usize> NatsCollections for Heapless<TOPIC, PAYLOAD> {
+impl<M: RawMutex + Send + Sync, const TOPIC: usize, const PAYLOAD: usize> NatsCollections
+    for Heapless<M, TOPIC, PAYLOAD>
+{
     type Topic = heapless::String<TOPIC>;
     type MsgBuf = heapless::Vec<u8, PAYLOAD>;
     type SyncBuf = heapless::Vec<u8, INFO_MSG_MAX_LEN>;
     type AuthBuf = heapless::Vec<u8, AUTH_JSON_MAX_LEN>;
+    type RawMutex = M;
 }
 
 impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
@@ -300,14 +312,17 @@ pub struct NatsInfoMsg {
     pub proto: i32,
 }
 
-type InfoWatch = watch::Watch<RawMutex, NatsInfoMsg, 0>;
-type InfoSender<'a> = watch::Sender<'a, RawMutex, NatsInfoMsg, 0>;
+type InfoWatch<C> = watch::Watch<<C as NatsCollections>::RawMutex, NatsInfoMsg, 0>;
+type InfoSender<'a, C> = watch::Sender<'a, <C as NatsCollections>::RawMutex, NatsInfoMsg, 0>;
 type InfoReceiver<'a> = watch::DynAnonReceiver<'a, NatsInfoMsg>;
 
 const CMD_CHANNEL_SIZE: usize = 3;
-type CmdChannel<'a, C> = channel::Channel<RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
-type CmdSender<'a, C> = channel::Sender<'a, RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
-type CmdReceiver<'a, C> = channel::Receiver<'a, RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdChannel<'a, C> =
+    channel::Channel<<C as NatsCollections>::RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdSender<'a, C> =
+    channel::Sender<'a, <C as NatsCollections>::RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdReceiver<'a, C> =
+    channel::Receiver<'a, <C as NatsCollections>::RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
 
 enum InternalCmd<'a, C>
 where
@@ -404,7 +419,7 @@ pub struct Storage<'a, C>
 where
     C: NatsCollections,
 {
-    info_watch: InfoWatch,
+    info_watch: InfoWatch<C>,
     cmd_channel: CmdChannel<'a, C>,
     sub_count: AtomicUsize,
 }
@@ -414,8 +429,8 @@ where
 {
     /// Create a new instance of the storage
     pub const fn new() -> Self {
-        let info_watch = InfoWatch::new();
-        let cmd_channel = CmdChannel::new();
+        let info_watch = InfoWatch::<C>::new();
+        let cmd_channel = CmdChannel::<C>::new();
         let sub_count = AtomicUsize::new(0);
 
         Self {
@@ -427,11 +442,11 @@ where
 }
 
 /// Create a new embassy runner/client pair without authentication
-pub fn new_no_auth<'a, C, const N: usize>(
+pub fn new_no_auth<'a, S: TcpConnect, C: NatsCollections, const N: usize>(
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: S,
     storage: &'a Storage<'a, C>,
-) -> (Client<'a, C, N>, Runner<'a, C, NoopAuthenticator, N>)
+) -> (Client<'a, C, N>, Runner<'a, S, C, NoopAuthenticator, N>)
 where
     C: NatsCollections,
 {
@@ -450,13 +465,13 @@ where
 }
 
 /// Create a new embassy runner/client pair with username / password authentication
-pub fn new_with_user_pwd<'a, C, const N: usize>(
+pub fn new_with_user_pwd<'a, S: TcpConnect, C: NatsCollections, const N: usize>(
     user: &str,
     pwd: &str,
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: S,
     storage: &'a Storage<'a, C>,
-) -> Result<(Client<'a, C, N>, Runner<'a, C, UserPwdAuthenticator, N>), CapacityError>
+) -> Result<(Client<'a, C, N>, Runner<'a, S, C, UserPwdAuthenticator, N>), CapacityError>
 where
     C: NatsCollections,
 {
@@ -475,12 +490,12 @@ where
 }
 
 /// Create a new embassy runner/client pair with token authentication
-pub fn new_with_auth_token<'a, C, const N: usize>(
+pub fn new_with_auth_token<'a, S: TcpConnect, C: NatsCollections, const N: usize>(
     auth_token: &str,
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: S,
     storage: &'a Storage<'a, C>,
-) -> Result<(Client<'a, C, N>, Runner<'a, C, TokenAuthenticator, N>), CapacityError>
+) -> Result<(Client<'a, C, N>, Runner<'a, S, C, TokenAuthenticator, N>), CapacityError>
 where
     C: NatsCollections,
 {

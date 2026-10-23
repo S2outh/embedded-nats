@@ -12,11 +12,11 @@ macro_rules! defmt {
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Error)]
-pub enum FramerError<R> {
+pub enum FramerError<E> {
     #[error("Disconnected")]
     Disconnected,
     #[error("Read error: {0}")]
-    Read(R),
+    Read(E),
     #[error("Capacity of collection {0} not sufficient for operation")]
     Capacity(#[from] CapacityError),
     #[error("Json deserialization error {0}")]
@@ -269,10 +269,11 @@ mod tests {
     use super::*;
     use crate::Heapless;
     use embassy_futures::block_on;
+    use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
     use std::collections::VecDeque;
     use std::vec::Vec;
 
-    type C = Heapless<32, 64>;
+    type C = Heapless<ThreadModeRawMutex, 32, 64>;
 
     /// A reader yielding the provided chunks. A single read never crosses a chunk
     /// boundary, which simulates data arriving in separate packets.

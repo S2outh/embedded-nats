@@ -6,7 +6,7 @@ use embassy_sync::{
 };
 use portable_atomic::AtomicU8;
 
-use crate::{NatsCollections, NatsMsg, RawMutex};
+use crate::{NatsCollections, NatsMsg};
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, thiserror::Error)]
@@ -54,7 +54,7 @@ impl AtomicState {
 }
 
 pub struct MsgChannel<C: NatsCollections, const N: usize> {
-    channel: channel::Channel<RawMutex, NatsMsg<C>, N>,
+    channel: channel::Channel<C::RawMutex, NatsMsg<C>, N>,
     state: AtomicState,
     waker: AtomicWaker,
 }
