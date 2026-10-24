@@ -1,5 +1,4 @@
 use embedded_io_async::Read;
-use thiserror::Error;
 
 use crate::{BytesBuf, CapacityError, DELIM, NatsCollections, NatsInfoMsg, NatsMsg, StrBuf};
 
@@ -11,8 +10,8 @@ macro_rules! defmt {
 }
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Error)]
-pub enum FramerError<E> {
+#[derive(Debug, thiserror::Error)]
+pub enum Error<E> {
     #[error("Disconnected")]
     Disconnected,
     #[error("Read error: {0}")]
@@ -27,9 +26,9 @@ pub enum FramerError<E> {
     Header,
 }
 
-impl<R> From<core::str::Utf8Error> for FramerError<R> {
+impl<R> From<core::str::Utf8Error> for Error<R> {
     fn from(_: core::str::Utf8Error) -> Self {
-        FramerError::Utf8
+        Error::Utf8
     }
 }
 
@@ -95,7 +94,7 @@ impl<C: NatsCollections> Framer<C> {
     pub async fn frame<R: Read>(
         &mut self,
         reader: &mut R,
-    ) -> Result<Option<Frame<C>>, FramerError<R::Error>> {
+    ) -> Result<Option<Frame<C>>, Error<R::Error>> {
         let internal_frame = match self {
             Self::Sync(framer) => framer.frame(reader).await,
             Self::Msg(framer) => framer.frame(reader).await,
@@ -132,15 +131,12 @@ impl<C: NatsCollections> SyncFramer<C> {
     async fn frame<R: Read>(
         &mut self,
         reader: &mut R,
-    ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
+    ) -> Result<InternalFrame<C>, Error<R::Error>> {
         let mut slice = self.buffer.reserve_slice(1)?;
-        let n = reader
-            .read(&mut slice)
-            .await
-            .map_err(|e| FramerError::Read(e))?;
+        let n = reader.read(&mut slice).await.map_err(|e| Error::Read(e))?;
         slice.confirm(n);
         if n == 0 {
-            return Err(FramerError::Disconnected);
+            return Err(Error::Disconnected);
         }
 
         if self.buffer.as_bytes().last().unwrap() == &DELIM[self.magic_pos] {
@@ -159,26 +155,26 @@ impl<C: NatsCollections> SyncFramer<C> {
         }
     }
 
-    fn parse_header<E>(&mut self) -> Result<InternalFrame<C>, FramerError<E>> {
+    fn parse_header<E>(&mut self) -> Result<InternalFrame<C>, Error<E>> {
         fn parse_msg_header<E, C: NatsCollections>(
             msg: &str,
-        ) -> Result<InternalFrame<C>, FramerError<E>> {
+        ) -> Result<InternalFrame<C>, Error<E>> {
             let Some((topic, msg)) = msg.split_once(' ') else {
                 defmt!(error!("nats msg header parsing error (1)"));
-                return Err(FramerError::Header);
+                return Err(Error::Header);
             };
             let Some((sid, msg)) = msg.split_once(' ') else {
                 defmt!(error!("nats msg header parsing error (2)"));
-                return Err(FramerError::Header);
+                return Err(Error::Header);
             };
             let (_reply_to, len) = msg.split_once(' ').unwrap_or(("", msg));
             let Ok(sid) = sid.parse::<usize>() else {
                 defmt!(error!("nats sid parsing error: '{}'", sid));
-                return Err(FramerError::Header);
+                return Err(Error::Header);
             };
             let Ok(len) = len.parse::<usize>() else {
                 defmt!(error!("nats msg len parsing error: '{}'", len));
-                return Err(FramerError::Header);
+                return Err(Error::Header);
             };
 
             Ok(InternalFrame::MsgHeader {
@@ -204,7 +200,7 @@ impl<C: NatsCollections> SyncFramer<C> {
                 Ok((info, _)) => Ok(InternalFrame::Info(info)),
                 Err(e) => {
                     defmt!(warn!("could not decode nats INFO"));
-                    Err(FramerError::Deser(e))
+                    Err(Error::Deser(e))
                 }
             },
             "-ERR" => {
@@ -215,7 +211,7 @@ impl<C: NatsCollections> SyncFramer<C> {
             "MSG" => parse_msg_header(msg),
             _default => {
                 defmt!(warn!("unknown nats cmd {}", _default));
-                Err(FramerError::Header)
+                Err(Error::Header)
             }
         }
     }
@@ -233,16 +229,13 @@ impl<C: NatsCollections> MsgFramer<C> {
     async fn frame<R: Read>(
         &mut self,
         reader: &mut R,
-    ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
+    ) -> Result<InternalFrame<C>, Error<R::Error>> {
         let pos = self.buffer.len();
         let mut slice = self.buffer.reserve_slice((self.len + DELIM.len()) - pos)?;
-        let n = reader
-            .read(&mut slice)
-            .await
-            .map_err(|e| FramerError::Read(e))?;
+        let n = reader.read(&mut slice).await.map_err(|e| Error::Read(e))?;
         slice.confirm(n);
         if n == 0 {
-            return Err(FramerError::Disconnected);
+            return Err(Error::Disconnected);
         }
 
         if self.buffer.len() >= (self.len + DELIM.len()) {
@@ -313,7 +306,7 @@ mod tests {
     fn next_frame(
         framer: &mut Framer<C>,
         provider: &mut Provider,
-    ) -> Result<Frame<C>, FramerError<core::convert::Infallible>> {
+    ) -> Result<Frame<C>, Error<core::convert::Infallible>> {
         loop {
             if let Some(frame) = block_on(framer.frame(provider))? {
                 return Ok(frame);
@@ -388,7 +381,7 @@ mod tests {
         let mut provider = Provider::new(&[b"MSG foo 2 100\r\n"]);
         assert!(matches!(
             next_frame(&mut framer, &mut provider),
-            Err(FramerError::Capacity(CapacityError::Bytes))
+            Err(Error::Capacity(CapacityError::Bytes))
         ));
     }
 
@@ -398,7 +391,7 @@ mod tests {
         let mut provider = Provider::new(&[b"FOO bar\r\n"]);
         assert!(matches!(
             next_frame(&mut framer, &mut provider),
-            Err(FramerError::Header)
+            Err(Error::Header)
         ));
     }
 
@@ -408,7 +401,7 @@ mod tests {
         let mut provider = Provider::new(&[b"MSG foo x 3\r\n"]);
         assert!(matches!(
             next_frame(&mut framer, &mut provider),
-            Err(FramerError::Header)
+            Err(Error::Header)
         ));
     }
 
@@ -418,7 +411,7 @@ mod tests {
         let mut provider = Provider::new(&[b"PIN"]);
         assert!(matches!(
             next_frame(&mut framer, &mut provider),
-            Err(FramerError::Disconnected)
+            Err(Error::Disconnected)
         ));
     }
 }

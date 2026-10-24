@@ -127,7 +127,7 @@ where
         select_slice(Pin::new(&mut futs[..])).await.0
     }
 
-    /// try to return any currently pending messages in the
+    /// Try to return any currently pending messages in the
     /// receive buffer
     pub fn try_receive(&mut self) -> Option<NatsMsg<C>> {
         self.sub_vec

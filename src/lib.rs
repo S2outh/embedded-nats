@@ -1,23 +1,4 @@
-//! This crate provides an embedded embassy net based implementation of the
-//! Nats client protocol: (https://docs.nats.io/reference/protocols/client).
-//! It allows for either the usage of [`alloc`] types if a global allocator is present
-//! (requires the *alloc* feature to be active) or using fixed size collections
-//! from the [`heapless`] crate. Furthermore defmt print statements are supported
-//! and can be enabled using the *defmt* feature.
-//!
-//! The entrypoint for this crate is one of three new() functions that can be used
-//! to connect to a Nats server using one of three supported authentication methods:
-//! No authentication, User/Password authentication and Token authentication.
-//! These new() functions will return a runner and a client. The runner only exposes an
-//! async run function that should be called in a dedicated task. To interface with
-//! the runner the client type exposes a set of methods for subscribing, publishing
-//! and receiving messages. If more than one client is necessary the client can safely be cloned.
-//! Each client keeps a separate list of subsciptions.
-//!
-//! For types that need to be statically available this crate exposes a [`Storage`]
-//! type that can be created in a const context. An immutable reference to such a storage
-//! should be provided to the respective new() function. Each separate runner will require
-//! a separate Storage.
+#![doc = include_str!("../README.md")]
 #![no_std]
 
 mod client;
@@ -168,6 +149,7 @@ pub trait BytesBuf: Sized + Default {
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+/// Provider for collections using `alloc::` types
 #[cfg(feature = "alloc")]
 pub struct Alloc<M: RawMutex> {
     _m: PhantomData<M>,
@@ -227,6 +209,7 @@ impl BytesBuf for alloc::vec::Vec<u8> {
     }
 }
 
+/// Provider for collections using `heaples::` types
 pub struct Heapless<M: RawMutex, const TOPIC: usize, const PAYLOAD: usize> {
     _m: PhantomData<M>,
 }
@@ -290,6 +273,8 @@ impl<const PAYLOAD: usize> BytesBuf for heapless::Vec<u8, PAYLOAD> {
     }
 }
 
+/// A Nats message received from the server. it contains the SID of the subscription,
+/// the topic and the message body.
 pub struct NatsMsg<C>
 where
     C: NatsCollections,
@@ -299,6 +284,8 @@ where
     pub data: C::MsgBuf,
 }
 
+/// A Nats INFO message received from the server.
+/// it contains the most relevant deserialized fields of the INFO message.
 #[derive(serde::Deserialize, Clone)]
 pub struct NatsInfoMsg {
     pub server_id: heapless::String<INFO_METADATA_STR_SIZE>,
@@ -335,6 +322,7 @@ where
 
 pub trait NatsAuthenticator: serde::Serialize + sealed::Sealed {}
 
+/// Authentication provider for servers with no authentication
 #[derive(serde::Serialize)]
 pub struct NoopAuthenticator {
     verbose: bool,
@@ -360,6 +348,7 @@ impl NoopAuthenticator {
 impl sealed::Sealed for NoopAuthenticator {}
 impl NatsAuthenticator for NoopAuthenticator {}
 
+/// Authentication provider for servers with user/password authentication
 #[derive(serde::Serialize)]
 pub struct UserPwdAuthenticator {
     verbose: bool,
@@ -388,6 +377,7 @@ impl UserPwdAuthenticator {
 impl sealed::Sealed for UserPwdAuthenticator {}
 impl NatsAuthenticator for UserPwdAuthenticator {}
 
+/// Authentication provider for servers with token authentication
 #[derive(serde::Serialize)]
 pub struct TokenAuthenticator {
     verbose: bool,
@@ -414,7 +404,7 @@ impl TokenAuthenticator {
 impl sealed::Sealed for TokenAuthenticator {}
 impl NatsAuthenticator for TokenAuthenticator {}
 
-/// Static storage of sync types used by an nats runner instance
+/// Static storage of sync types used by the nats runner instance
 pub struct Storage<'a, C>
 where
     C: NatsCollections,
@@ -444,7 +434,7 @@ where
 /// Create a new embassy runner/client pair without authentication
 pub fn new_no_auth<'a, S: TcpConnect, C: NatsCollections, const N: usize>(
     address: SocketAddr,
-    socket: S,
+    client: S,
     storage: &'a Storage<'a, C>,
 ) -> (Client<'a, C, N>, Runner<'a, S, C, NoopAuthenticator, N>)
 where
@@ -455,7 +445,7 @@ where
     let runner = Runner::new(
         auth,
         address,
-        socket,
+        client,
         storage.info_watch.sender(),
         storage.cmd_channel.receiver(),
     );
@@ -469,7 +459,7 @@ pub fn new_with_user_pwd<'a, S: TcpConnect, C: NatsCollections, const N: usize>(
     user: &str,
     pwd: &str,
     address: SocketAddr,
-    socket: S,
+    client: S,
     storage: &'a Storage<'a, C>,
 ) -> Result<(Client<'a, C, N>, Runner<'a, S, C, UserPwdAuthenticator, N>), CapacityError>
 where
@@ -480,7 +470,7 @@ where
     let runner = Runner::new(
         auth,
         address,
-        socket,
+        client,
         storage.info_watch.sender(),
         storage.cmd_channel.receiver(),
     );
@@ -493,7 +483,7 @@ where
 pub fn new_with_auth_token<'a, S: TcpConnect, C: NatsCollections, const N: usize>(
     auth_token: &str,
     address: SocketAddr,
-    socket: S,
+    client: S,
     storage: &'a Storage<'a, C>,
 ) -> Result<(Client<'a, C, N>, Runner<'a, S, C, TokenAuthenticator, N>), CapacityError>
 where
@@ -504,7 +494,7 @@ where
     let runner = Runner::new(
         auth,
         address,
-        socket,
+        client,
         storage.info_watch.sender(),
         storage.cmd_channel.receiver(),
     );
