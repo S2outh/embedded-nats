@@ -155,3 +155,80 @@ impl<'a, S: TcpConnect, C: NatsCollections, A: NatsAuthenticator> NatsTransport<
         self.framer = Framer::new();
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    extern crate std;
+    use super::*;
+    use crate::{Heapless, NoopAuthenticator};
+    use embassy_futures::block_on;
+    use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+    use embedded_io_async::Read;
+    use std::vec::Vec;
+
+    type C = Heapless<ThreadModeRawMutex, 32, 64>;
+
+    struct DummyConnect;
+
+    impl TcpConnect for DummyConnect {
+        type Error = core::convert::Infallible;
+        type Connection<'a>
+            = Consumer
+        where
+            Self: 'a;
+        async fn connect<'a>(
+            &'a self,
+            _remote: core::net::SocketAddr,
+        ) -> core::result::Result<Self::Connection<'a>, Self::Error> {
+            Ok(Consumer::new(&[]))
+        }
+    }
+
+    /// A writer comparing the written data to a reference
+    struct Consumer {
+        data: Vec<u8>,
+    }
+
+    impl Consumer {
+        fn new(chunks: &[u8]) -> Self {
+            Self {
+                data: chunks.to_vec(),
+            }
+        }
+    }
+
+    impl embedded_io_async::ErrorType for Consumer {
+        type Error = core::convert::Infallible;
+    }
+
+    impl Write for Consumer {
+        async fn write(&mut self, buf: &[u8]) -> core::result::Result<usize, Self::Error> {
+            let len = buf.len();
+            assert_eq!(buf, &self.data[..len], "Buffer is wrong");
+            self.data.drain(..len);
+            Ok(len)
+        }
+        async fn flush(&mut self) -> core::result::Result<(), Self::Error> {
+            // do nothing
+            Ok(())
+        }
+    }
+
+    impl Read for Consumer {
+        async fn read(&mut self, _buf: &mut [u8]) -> core::result::Result<usize, Self::Error> {
+            Ok(0)
+        }
+    }
+
+    type TestTransport<'a> = NatsTransport<'a, DummyConnect, C, NoopAuthenticator>;
+
+    #[test]
+    fn pong() {
+        let consumer = Consumer::new(b"PONG\r\n");
+        let authenticator = NoopAuthenticator::new();
+        let mut transport = TestTransport::new(consumer, &authenticator);
+
+        block_on(transport.pong()).unwrap();
+    }
+}
